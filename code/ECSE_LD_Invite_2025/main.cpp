@@ -1,14 +1,24 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include <string.h>
+#include "hardware/adc.h"
 #include "matrix_display.hpp"
 #include "pindefs.hpp"
 #include "pico_flash.hpp"
 #include "clw_dbgutils.h"
+
 #define STR_BUFFER_LEN 128
+// Number of temperature samples of the "baseline" room temperature to take on startup
+#define BASELINE_SAMPLES 128
+// Offset to add to baseline to account for self-heating after turning on the card
+#define BASELINE_OFFSET -0.1f
+// Number of samples to average for temperature reading
+#define AVERAGE_WINDOW 32
+// Minimum and maximum brightness levels
+#define MAX_BRIGHTNESS 0.95f
+#define MIN_BRIGHTNESS 0.05f
 
-
-
+#define DEBUG_PRINT 0
 
 void init_gpio(void){
     gpio_init_mask(MASK_ALL_COLS|MASK_ALL_ROWS);
@@ -23,11 +33,241 @@ void init_gpio(void){
     gpio_set_dir(PB2,0);
     gpio_pull_up(PB1);
     gpio_pull_up(PB2);
+    
+    adc_init();
 }
 
 uint counter = 0;
 uint scroll_count = 0;
 const uint8_t * current_char;
+
+float current_brightness = 0.55f;
+
+// Swipe detection thresholds
+#define TOUCH_THRESHOLD 10      // How much below baseline counts as a touch
+#define SWIPE_TIMEOUT_MS 300    // Max time for a complete swipe
+#define BRIGHTNESS_STEP 0.1f   // How much to change brightness per swipe
+
+// Swipe animation state
+struct SwipeAnimation {
+    bool active;
+    bool direction_up;
+    int8_t position;    // -3 to 7 (starts off screen, moves across)
+    uint32_t last_update;
+} swipe_anim = {false, false, 0, 0};
+
+#define SWIPE_ANIM_DURATION_MS 400
+#define SWIPE_ANIM_STEPS 10
+
+// Function to detect swipes and update brightness
+void update_brightness_from_swipe(void) {
+    static uint32_t last_update = 0;
+    static uint32_t last_debug_print = 0;
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    
+    // Update every 20ms
+    if (now - last_update < 20) {
+        return;
+    }
+    last_update = now;
+    
+    // Read all ADC channels (0-3 are touch sensors)
+    uint16_t adc_readings[5];
+    for (uint8_t i = 0; i < 5; i++) {
+        adc_select_input(i);
+        adc_readings[i] = adc_read();
+    }
+    
+    // Calibrate baselines dynamically (slow moving average)
+    static float baselines[4] = {0};
+    static bool baselines_init = false;
+    
+    if (!baselines_init) {
+        for (uint8_t i = 0; i < 4; i++) {
+            baselines[i] = adc_readings[i];
+        }
+        baselines_init = true;
+    }
+    
+    // Detect touches (drop below baseline)
+    bool touches[4] = {false};
+    
+    for (uint8_t i = 0; i < 4; i++) {
+        touches[i] = (baselines[i] - adc_readings[i]) > TOUCH_THRESHOLD;
+    }
+    
+    // Update baseline when not touching (prevents drift during touch)
+    for (uint8_t i = 0; i < 4; i++) {
+        if (!touches[i]) {
+            baselines[i] = baselines[i] * 0.95f + adc_readings[i] * 0.05f;
+        }
+    }
+    
+    // Top to bottom swipe: 0 -> 3 decreases brightness
+    static enum {IDLE, TOUCH_0, TOUCH_1, TOUCH_2, TOUCH_3} swipe_state = IDLE;
+    static uint32_t swipe_start_time = 0;
+    static bool swipe_detected = false;
+    
+    if (now - swipe_start_time > SWIPE_TIMEOUT_MS) {
+        swipe_state = IDLE;
+    }
+    
+    switch (swipe_state) {
+        case IDLE:
+            if (touches[0]) {
+                swipe_state = TOUCH_0;
+                swipe_start_time = now;
+            }
+            break;
+        case TOUCH_0:
+            if (touches[1]) swipe_state = TOUCH_1;
+            break;
+        case TOUCH_1:
+            if (touches[2]) swipe_state = TOUCH_2;
+            break;
+        case TOUCH_2:
+            if (touches[3]) {
+                current_brightness -= BRIGHTNESS_STEP;
+                if (current_brightness < MIN_BRIGHTNESS) current_brightness = MIN_BRIGHTNESS;
+                swipe_state = TOUCH_3;
+                swipe_detected = true;
+                // Trigger downward swipe animation
+                swipe_anim.active = true;
+                swipe_anim.direction_up = false;
+                swipe_anim.position = -3;
+                swipe_anim.last_update = now;
+            }
+            break;
+        case TOUCH_3:
+            if (!touches[0] && !touches[1] && !touches[2] && !touches[3]) {
+                swipe_state = IDLE;
+            }
+            break;
+    }
+    
+    // Bottom to top swipe: 3 ->0 increases brightness
+    static enum {R_IDLE, R_TOUCH_3, R_TOUCH_2, R_TOUCH_1, R_TOUCH_0} r_swipe_state = R_IDLE;
+    static uint32_t r_swipe_start_time = 0;
+    
+    if (now - r_swipe_start_time > SWIPE_TIMEOUT_MS) {
+        r_swipe_state = R_IDLE;
+    }
+    
+    switch (r_swipe_state) {
+        case R_IDLE:
+            if (touches[3]) {
+                r_swipe_state = R_TOUCH_3;
+                r_swipe_start_time = now;
+            }
+            break;
+        case R_TOUCH_3:
+            if (touches[2]) r_swipe_state = R_TOUCH_2;
+            break;
+        case R_TOUCH_2:
+            if (touches[1]) r_swipe_state = R_TOUCH_1;
+            break;
+        case R_TOUCH_1:
+            if (touches[0]) {
+                current_brightness += BRIGHTNESS_STEP;
+                if (current_brightness > MAX_BRIGHTNESS) current_brightness = MAX_BRIGHTNESS;
+                r_swipe_state = R_TOUCH_0;
+                swipe_detected = true;
+                // Trigger upward swipe animation
+                swipe_anim.active = true;
+                swipe_anim.direction_up = true;
+                swipe_anim.position = -3;
+                swipe_anim.last_update = now;
+            }
+            break;
+        case R_TOUCH_0:
+            if (!touches[0] && !touches[1] && !touches[2] && !touches[3]) {
+                r_swipe_state = R_IDLE;
+            }
+            break;
+    }
+
+#if DEBUG_PRINT
+    if (now - last_debug_print > 200) {
+        printf("ADC: %4d %4d %4d %4d | Base: %4.0f %4.0f %4.0f %4.0f | Touch: %d%d%d%d | Bright: %.1f%%%s\n",
+               adc_readings[0], adc_readings[1], adc_readings[2], adc_readings[3],
+               baselines[0], baselines[1], baselines[2], baselines[3],
+               touches[0], touches[1], touches[2], touches[3],
+               current_brightness * 100.0f,
+               swipe_detected ? " <- SWIPE!" : "");
+        
+        swipe_detected = false;
+        last_debug_print = now;
+    }
+#endif
+}
+
+// Update and get swipe animation layers
+// Returns true if animation is active, fills swipe_layers and brightness arrays
+bool get_swipe_animation(uint8_t swipe_layers[5], float swipe_row_brightness[5]) {
+    // Empty
+    for (int i = 0; i < 5; i++) {
+        swipe_layers[i] = 0;
+        swipe_row_brightness[i] = 0.0f;
+    }
+    
+    if (!swipe_anim.active) {
+        return false;
+    }
+    
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    uint32_t elapsed = now - swipe_anim.last_update;
+    
+    // Update position every ~40ms
+    if (elapsed >= (SWIPE_ANIM_DURATION_MS / SWIPE_ANIM_STEPS)) {
+        swipe_anim.position++;
+        swipe_anim.last_update = now;
+        
+        // End animation when all lines have passed through
+        if (swipe_anim.position > 7) {
+            swipe_anim.active = false;
+            return false;
+        }
+    }
+    
+    // Calculate row positions
+    int8_t row1, row2, row3;
+    if (swipe_anim.direction_up) {
+        row1 = 4 - swipe_anim.position;       // Leading vertical line
+        row2 = 4 - (swipe_anim.position - 1); // Middle layer
+        row3 = 4 - (swipe_anim.position - 2); // Trailing layer
+    } else {
+        row1 = swipe_anim.position;           // Leading horizontal line
+        row2 = swipe_anim.position - 1;       // Middle layer
+        row3 = swipe_anim.position - 2;       // Trailing layer
+    }
+    
+    // Set horizontal lines by setting the same bit in all rows for each row
+    for (int row = 0; row < 5; row++) {
+        if (row1 >= 0 && row1 < 5) {
+            swipe_layers[row] |= (1 << (4 - row1));
+        }
+        if (row2 >= 0 && row2 < 5) {
+            swipe_layers[row] |= (1 << (4 - row2));
+        }
+        if (row3 >= 0 && row3 < 5) {
+            swipe_layers[row] |= (1 << (4 - row3));
+        }
+    }
+
+    // Set row brightnesses - first row is 80%, then 50%, then 15%
+    if (row1 >= 0 && row1 < 5) {
+        swipe_row_brightness[row1] = 0.80f;
+    }
+    if (row2 >= 0 && row2 < 5) {
+        swipe_row_brightness[row2] = 0.50f;
+    }
+    if (row3 >= 0 && row3 < 5) {
+        swipe_row_brightness[row3] = 0.15f;
+    }
+    
+    return true;
+}
+
 //const char * testString = ;
 enum disp_mode{
     USER = 0,
@@ -145,7 +385,19 @@ int main()
             //print_print_buff();
         }
         for(int i = 0; i < 100; i++){
-            disp_char(current_char); 
+            update_brightness_from_swipe();
+
+            uint8_t swipe_layers[5];
+            float swipe_row_brightness[5];
+            bool has_swipe = get_swipe_animation(swipe_layers, swipe_row_brightness);
+
+            // Display with or without swipe effect
+            if (has_swipe) {
+                disp_char_with_swipe(current_char, current_brightness, swipe_layers, swipe_row_brightness);
+            } else {
+                disp_char(current_char, current_brightness);
+            }
+            
             //This is janky - ISRs were being weird so we just do 100 display cycles for every button poll
             //which means our polling rate is worst case 100us*25*100 = 250ms.
             //if ISRs still funky maybe throw this on core 1? would be cool and leave core 0 available for user code/polling.

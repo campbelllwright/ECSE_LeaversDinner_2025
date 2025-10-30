@@ -232,14 +232,65 @@ void scroll_chars(void){
     scroll_buff[13] = 0;
 }
 
+// Helper function to apply cubic brightness scaling
+static inline float apply_brightness_scaling(float brightness) {
+    if (brightness < 0.0f) brightness = 0.0f;
+    if (brightness > 1.0f) brightness = 1.0f;
+    // Cubic scaling for perceptual linearity: 0.5(x+0.25)^3 + 0.02
+    return 0.5f * (brightness + 0.25f) * (brightness + 0.25f) * (brightness + 0.25f) + 0.02f;
+}
+
+// Helper function to render a single pixel with brightness
+static inline void render_pixel(uint8_t row, uint8_t col, float brightness) {
+    static const uint rows[] = {LED_R1, LED_R2, LED_R3, LED_R4, LED_R5};
+    static const uint cols[] = {LED_C1, LED_C2, LED_C3, LED_C4, LED_C5};
+    
+    uint on_time_us = (uint)(LED_period_us * brightness);
+    uint off_time_us = LED_period_us - on_time_us;
+    
+    if (on_time_us > 0) {
+        gpio_put_masked(MASK_ALL_COLS|MASK_ALL_ROWS, (1<<cols[col])|(MASK_ALL_ROWS &~(1<<rows[row])));
+        sleep_us(on_time_us);
+    }
+    
+    if (off_time_us > 0) {
+        gpio_put_masked(MASK_ALL_COLS|MASK_ALL_ROWS, MASK_ALL_ROWS);
+        sleep_us(off_time_us);
+    }
+}
 
 
-void disp_char(const uint8_t * character){
-    for(uint8_t i = 0; i < 5; i++){ 
-        for(uint8_t j = 0; j < 5; j++){
-            if((character[i]>>(4-j))&0x01){
-                set_led(i,j);
+void disp_char(const uint8_t * character, float brightness){
+    brightness = apply_brightness_scaling(brightness);
+    
+    for(uint8_t row = 0; row < 5; row++){ 
+        for(uint8_t col = 0; col < 5; col++){
+            if((character[row]>>(4-col))&0x01){
+                render_pixel(row, col, brightness);
             } 
+        }
+    }
+    clear_matrix();
+}
+
+// Display character with swipe effect layers in background
+void disp_char_with_swipe(const uint8_t * character, float brightness, const uint8_t * swipe_layers, const float * swipe_col_brightness){
+    brightness = apply_brightness_scaling(brightness);
+    
+    for(uint8_t row = 0; row < 5; row++){ 
+        for(uint8_t col = 0; col < 5; col++){
+            bool text_pixel = (character[row]>>(4-col))&0x01;
+            bool swipe_pixel = (swipe_layers[row]>>(4-col))&0x01;
+            
+            // Text has priority - render at full brightness
+            if (text_pixel) {
+                render_pixel(row, col, brightness);
+            }
+            // Swipe effect in background - use row brightness for vertical lines
+            else if (swipe_pixel && swipe_col_brightness[col] > 0.0f) {
+                float swipe_bright = apply_brightness_scaling(swipe_col_brightness[col]);
+                render_pixel(row, col, swipe_bright);
+            }
         }
     }
     clear_matrix();
