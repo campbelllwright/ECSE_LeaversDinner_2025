@@ -5,6 +5,7 @@
 #include "pindefs.hpp"
 #include "pico_flash.hpp"
 #include "clw_dbgutils.h"
+#include "build/matrix.pio.h"
 #define STR_BUFFER_LEN 128
 
 
@@ -98,11 +99,14 @@ int main()
     tempBufferIdx = 1;
     stdio_init_all();
     init_gpio();
+    sleep_ms(1000);
     read_name_from_flash(userStringBuffer, STR_BUFFER_LEN);
+    printf("pio start:%d\n",init_pio_matrix());
     screen_start();
-    printf("hello, world!");
-    add_repeating_timer_ms(-100,scroll_timer_cb,0,&scroll_timer);
     
+    printf("hello, world! ");
+
+    add_repeating_timer_ms(100,scroll_timer_cb,0,&scroll_timer);
     while (true) {
         static bool pb1_last = 1, pb2_last = 1;
         bool pb1_val = gpio_get(PB1);
@@ -137,19 +141,13 @@ int main()
         pb1_last = pb1_val;
 
         if(gpio_get(PB2)){
-            current_char=scroll_buff;//char_to_matrix(stringBuffer[counter]);
+            current_char=scroll_buff;
         }
         else{
-            //scroll_screen();
-            //current_char = char_to_matrix(128);
-            //print_print_buff();
+            current_char = char_to_matrix(128);
         }
-        for(int i = 0; i < 100; i++){
-            disp_char(current_char); 
-            //This is janky - ISRs were being weird so we just do 100 display cycles for every button poll
-            //which means our polling rate is worst case 100us*25*100 = 250ms.
-            //if ISRs still funky maybe throw this on core 1? would be cool and leave core 0 available for user code/polling.
-        }
+
+        push_display(current_char,0);
         //scroll_screen();
         char inChar = getchar_timeout_us(10);
         if(inChar != 0xFE){

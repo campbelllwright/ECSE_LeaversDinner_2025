@@ -38,7 +38,10 @@ pico_sdk_init()
 add_executable(ECSE_LD_Invite_2025 main.cpp matrix_display.cpp pico_flash.cpp)
 
 pico_set_program_name(ECSE_LD_Invite_2025 "ECSE_LD_Invite_2025")
-pico_set_program_version(ECSE_LD_Invite_2025 "1.0")
+pico_set_program_version(ECSE_LD_Invite_2025 "1.1")
+
+pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/matrix.pio)
+
 
 # Modify the below lines to enable/disable output over UART/USB
 pico_enable_stdio_uart(ECSE_LD_Invite_2025 0)
@@ -48,7 +51,8 @@ pico_set_linker_script(ECSE_LD_Invite_2025 ${CMAKE_SOURCE_DIR}/memmap_custom.ld)
 
 # Add the standard library to the build
 target_link_libraries(ECSE_LD_Invite_2025
-        pico_stdlib)
+        pico_stdlib
+        hardware_pio)
 
 # Add the standard include files to the build
 target_include_directories(ECSE_LD_Invite_2025 PRIVATE

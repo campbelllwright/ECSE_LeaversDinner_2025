@@ -1,0 +1,72 @@
+; matrix.pio
+; LED matrix driver for PIO
+.program matrix
+
+; Wait for first 32-bit frame (lower 25 bits used)
+;pull block
+;mov x, OSR
+
+.wrap_target
+    ; col 0 (bits 0..4)
+    out pins, 5 ;
+    set pins, 0b01111 [15]
+    set pins, 0b11111
+    ; Row 1 (bits 5..9)
+    out pins, 5
+    set pins, 0b10111 [15]
+    set pins, 0b11111
+    ; Row 2 (bits 10..14)
+    out pins, 5
+    set pins, 0b11011 [15]
+    set pins, 0b11111
+    ; Row 3 (bits 15..19)
+    out pins, 5
+    set pins, 0b11101 [15]
+    set pins, 0b11111
+    ; Row 4 (bits 20..24)
+    out pins, 5
+    set pins, 0b11110 [15]
+    set pins, 0b11111
+
+    mov y, osr; remaining 7 bits into OSR
+countloop:
+    jmp y-- countloop;  use extra data for duty cycle control
+
+    ; pull new frame from TX FIFO
+    pull noblock
+    mov x, osr ; pull noblock becomes (mov OSR, x) if TX FIFO is empty, so we update X with whatever's in OSR to ensure we keep displaying the same data if none new given
+
+.wrap
+
+% c-sdk {
+#include "hardware/pio.h"
+#define LED_PIO       pio0
+#define LED_SM        0
+
+// Initialize PIO SM for the compiled PIO program
+static inline int matrix_pio_init(PIO pio, uint sm, uint col_base, uint row_base) {
+    // load program (symbol from generated header)
+    uint offset = pio_add_program(pio, &matrix_program);
+    pio_sm_config c = matrix_program_get_default_config(offset);
+
+    // configure OUT pins (columns) and SET pins (rows)
+    sm_config_set_set_pins(&c, row_base, 5);
+    sm_config_set_out_pins(&c, col_base, 5);
+
+    // configure which physical pins the SM will control (GPIO direction)
+    gpio_set_function_masked((MASK_ALL_COLS|MASK_ALL_ROWS), GPIO_FUNC_PIO0);
+    // set pin bases for the SM (these tell the hardware which pin is pin_base)
+    pio_sm_set_consecutive_pindirs(pio, sm, col_base, 5, true); // ensure out
+    pio_sm_set_consecutive_pindirs(pio, sm, row_base, 5, true); // ensure out
+
+    // init and enable SM
+    int rc = pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+    return rc;
+}
+
+static inline int init_pio_matrix(void){
+    return matrix_pio_init(LED_PIO,LED_SM,LED_C5,LED_R5);
+}
+
+%}
